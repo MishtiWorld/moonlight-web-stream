@@ -129,6 +129,10 @@ class ViewerApp implements Component {
     private div = document.createElement("div")
 
     private statsDiv = document.createElement("div")
+    // Minimal top-left FPS/latency HUD, toggled independently of the full Stats overlay.
+    private fpsHud = document.createElement("div")
+    private showFpsHud = localStorage.getItem("tb_fps_hud") === "1"
+    private showFullStats = false
     private localTouchCursorDiv = document.createElement("div")
     private stream: Stream
 
@@ -173,22 +177,39 @@ class ViewerApp implements Component {
         // Configure stats element
         this.statsDiv.hidden = true
         this.statsDiv.classList.add("video-stats")
+        this.fpsHud.hidden = !this.showFpsHud
+        this.fpsHud.classList.add("fps-hud")
         this.localTouchCursorDiv.hidden = true
         this.localTouchCursorDiv.classList.add("local-touch-cursor")
 
         setInterval(() => {
-            // Update stats display every 100ms
+            // Update the stats displays every 100ms. Full Stats overlay and the minimal
+            // top-left FPS/latency HUD are independent toggles; enable collection if either is on.
             const stats = this.getStream()?.getStats()
-            if (stats && stats.isEnabled()) {
+            if (!stats) {
+                this.statsDiv.hidden = true
+                this.fpsHud.hidden = true
+                return
+            }
+            stats.setEnabled(this.showFullStats || this.showFpsHud)
+            if (this.showFullStats) {
                 this.statsDiv.hidden = false
-
-                const text = streamStatsToText(stats.getCurrentStats())
-                this.statsDiv.innerText = text
+                this.statsDiv.innerText = streamStatsToText(stats.getCurrentStats())
             } else {
                 this.statsDiv.hidden = true
             }
+            if (this.showFpsHud) {
+                const c = stats.getCurrentStats()
+                const fps = c.videoFps != null ? Math.round(c.videoFps) : "–"
+                const ms = c.streamerRttMs != null ? Math.round(c.streamerRttMs) : "–"
+                this.fpsHud.textContent = `${fps} FPS · ${ms} ms`
+                this.fpsHud.hidden = false
+            } else {
+                this.fpsHud.hidden = true
+            }
         }, 100)
         this.div.appendChild(this.statsDiv)
+        this.div.appendChild(this.fpsHud)
         this.div.appendChild(this.localTouchCursorDiv)
 
         // Configure stream
@@ -846,6 +867,19 @@ class ViewerApp implements Component {
     getStream(): Stream | null {
         return this.stream
     }
+
+    // Toggle the full multi-line Stats overlay (bottom).
+    toggleFullStats() {
+        this.showFullStats = !this.showFullStats
+    }
+    // Toggle the minimal top-left FPS/latency HUD (persisted).
+    toggleFpsHud() {
+        this.showFpsHud = !this.showFpsHud
+        localStorage.setItem("tb_fps_hud", this.showFpsHud ? "1" : "0")
+    }
+    isFpsHudOn(): boolean {
+        return this.showFpsHud
+    }
 }
 
 class ConnectionInfoModal implements Modal<void> {
@@ -1017,6 +1051,7 @@ class ViewerSidebar implements Component, Sidebar {
     private fullscreenButton = document.createElement("button")
 
     private statsButton = document.createElement("button")
+    private fpsButton = document.createElement("button")
     private exitStreamButton = document.createElement("button")
 
     private mouseMode: SelectComponent
@@ -1090,13 +1125,20 @@ class ViewerSidebar implements Component, Sidebar {
         })
         this.buttonDiv.appendChild(this.fullscreenButton)
 
-        // Stats
+        // FPS/latency HUD toggle (minimal, top-left)
+        this.fpsButton.innerText = "FPS · ms"
+        this.fpsButton.title = "Toggle FPS + latency overlay (top-left)"
+        this.fpsButton.classList.toggle("active", this.app.isFpsHudOn())
+        this.fpsButton.addEventListener("click", () => {
+            this.app.toggleFpsHud()
+            this.fpsButton.classList.toggle("active", this.app.isFpsHudOn())
+        })
+        this.buttonDiv.appendChild(this.fpsButton)
+
+        // Stats (full overlay)
         this.statsButton.innerText = I.stream.stats
         this.statsButton.addEventListener("click", () => {
-            const stats = this.app.getStream()?.getStats()
-            if (stats) {
-                stats.toggle()
-            }
+            this.app.toggleFullStats()
         })
         this.buttonDiv.appendChild(this.statsButton)
 
