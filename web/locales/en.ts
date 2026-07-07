@@ -1,6 +1,6 @@
 export const en = {
     index: {
-        appTitle: "Moonlight Web",
+        appTitle: "Cloud Desktop",
         back: "Back",
         reload: "Reload",
         addHostUnreachable: (address: string) => `Host "${address}" is not reachable`,
