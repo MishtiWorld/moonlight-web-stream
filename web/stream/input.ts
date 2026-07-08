@@ -1,7 +1,7 @@
 import { StreamCapabilities, StreamControllerCapabilities, StreamMouseButton, TransportChannelId } from "../api_bindings.js"
 import { showNotification } from "../component/notification.js"
 import { ByteBuffer, I16_MAX, U16_MAX, U8_MAX } from "./buffer.js"
-import { ControllerConfig, emptyGamepadState, extractGamepadState, GamepadState, SUPPORTED_BUTTONS } from "./gamepad.js"
+import { areGamepadStatesEqual, ControllerConfig, emptyGamepadState, extractGamepadState, GamepadState, SUPPORTED_BUTTONS } from "./gamepad.js"
 import { convertToKey, convertToModifiers } from "./keyboard.js"
 import { convertToButton } from "./mouse.js"
 import { DataTransportChannel, Transport, TransportChannelIdKey, TransportChannelIdValue } from "./transport/index.js"
@@ -51,6 +51,10 @@ export type StreamInputConfig = {
     touchMode: TouchMode
     localCursorSensitivity: number
     controllerConfig: ControllerConfig
+    // Per-source input gates — let the user cut off keyboard / mouse / gamepad independently.
+    keyboardEnabled: boolean
+    mouseEnabled: boolean
+    gamepadEnabled: boolean
 }
 
 export function defaultStreamInputConfig(): StreamInputConfig {
@@ -63,7 +67,10 @@ export function defaultStreamInputConfig(): StreamInputConfig {
             invertAB: false,
             invertXY: false,
             sendIntervalOverride: null
-        }
+        },
+        keyboardEnabled: true,
+        mouseEnabled: true,
+        gamepadEnabled: true
     }
 }
 
@@ -239,6 +246,7 @@ export class StreamInput {
 
     // Note: key = StreamKeys.VK_, modifiers = StreamKeyModifiers.
     sendKey(isDown: boolean, key: number, modifiers: number) {
+        if (!this.config.keyboardEnabled) return
         this.buffer.reset()
 
         this.buffer.putU8(0)
@@ -250,6 +258,7 @@ export class StreamInput {
         trySendChannel(this.keyboard, this.buffer)
     }
     sendText(text: string) {
+        if (!this.config.keyboardEnabled) return
         this.buffer.reset()
 
         this.buffer.putU8(1)
@@ -262,6 +271,7 @@ export class StreamInput {
 
     // -- Mouse
     onMouseDown(event: MouseEvent, rect: DOMRect) {
+        if (!this.config.mouseEnabled) return
         const button = convertToButton(event)
         if (button == null) {
             return
@@ -278,6 +288,7 @@ export class StreamInput {
         }
     }
     onMouseUp(event: MouseEvent) {
+        if (!this.config.mouseEnabled) return
         const button = convertToButton(event)
         if (button == null) {
             return
@@ -290,6 +301,7 @@ export class StreamInput {
         }
     }
     onMouseMove(event: MouseEvent, rect: DOMRect) {
+        if (!this.config.mouseEnabled) return
         if (this.config.mouseMode == "relative") {
             this.sendMouseMoveClientCoordinates(event.movementX, event.movementY, rect)
         } else if (this.config.mouseMode == "follow") {
@@ -305,6 +317,7 @@ export class StreamInput {
         }
     }
     onMouseWheel(event: WheelEvent) {
+        if (!this.config.mouseEnabled) return
         this.sendAccumulatedScroll(event.deltaX, -event.deltaY)
     }
 
@@ -1068,7 +1081,7 @@ export class StreamInput {
             }
         }
 
-        this.sendControllerAdd(this.gamepads.length - 1, SUPPORTED_BUTTONS, capabilities)
+        this.sendControllerAdd(id, SUPPORTED_BUTTONS, capabilities)
 
         if (gamepad.mapping != "standard") {
             console.warn(`[Gamepad]: Unable to read values of gamepad with mapping ${gamepad.mapping}`)
@@ -1088,6 +1101,7 @@ export class StreamInput {
 
     private lastGamepadUpdate: number = performance.now()
     onGamepadUpdate() {
+        if (!this.config.gamepadEnabled) return
         if (this.config.controllerConfig.sendIntervalOverride != null) {
             const now = performance.now()
             if (now - this.lastGamepadUpdate < (1000 / this.config.controllerConfig.sendIntervalOverride)) {
@@ -1099,7 +1113,8 @@ export class StreamInput {
         for (let gamepadId = 0; gamepadId < this.gamepads.length; gamepadId++) {
             const oldGamepadState = this.gamepads[gamepadId]
             if (oldGamepadState == null) {
-                return
+                // Empty slot (a middle pad disconnected) — skip it, keep polling higher slots.
+                continue
             }
             const gamepad = navigator.getGamepads()[oldGamepadState.gamepadIndex]
             if (!gamepad) {
@@ -1111,12 +1126,26 @@ export class StreamInput {
             }
 
             const state = extractGamepadState(gamepad, this.config.controllerConfig)
-            if (state == oldGamepadState.oldState) {
+            // Value-compare (extractGamepadState returns a fresh object every frame, so `==` is
+            // always false and would send a packet every frame). Only send on actual change.
+            if (areGamepadStatesEqual(state, oldGamepadState.oldState)) {
                 continue
             }
             oldGamepadState.oldState = state
 
             this.sendController(gamepadId, state)
+        }
+    }
+
+    // Release every held controller input. Call before disabling the gamepad gate so no
+    // button/stick/trigger stays stuck pressed on the host.
+    releaseAllGamepads() {
+        for (let id = 0; id < this.gamepads.length; id++) {
+            const g = this.gamepads[id]
+            if (g == null) continue
+            const neutral = emptyGamepadState()
+            g.oldState = neutral
+            this.sendController(id, neutral)
         }
     }
 

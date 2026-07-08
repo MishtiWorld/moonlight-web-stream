@@ -253,6 +253,15 @@ export class WebRTCTransport implements Transport {
     private videoTrackHolder: TrackHolder = { ontrack: null, track: null }
     private videoReceiver: RTCRtpReceiver | null = null
 
+    // Previous cumulative video-receiver totals, so getStats() can turn the WebRTC cumulative-seconds
+    // counters into LIVE per-frame milliseconds (delta / frames-in-interval). Without this the raw
+    // values are lifetime totals in seconds mislabeled as "ms".
+    private prevVideoStats: {
+        jitterBufferDelay: number, jitterBufferTargetDelay: number, jitterBufferMinimumDelay: number,
+        jitterBufferEmittedCount: number, totalDecodeTime: number, totalProcessingDelay: number,
+        totalAssemblyTime: number, framesDecoded: number, framesAssembled: number,
+    } | null = null
+
     private audioTrackHolder: TrackHolder = { ontrack: null, track: null }
 
     private onTrack(event: RTCTrackEvent) {
@@ -386,10 +395,18 @@ export class WebRTCTransport implements Transport {
         }
         const stats = await this.videoReceiver.getStats()
 
-        console.debug("----------------- raw video stats -----------------")
-        for (const [key, value] of stats.entries()) {
-            console.debug("raw video stats", key, value)
+        // Raw cumulative-since-start totals (WebRTC spec unit = SECONDS). Normalized to per-frame ms below.
+        let jitterBufferDelay: number | null = null
+        let jitterBufferTargetDelay: number | null = null
+        let jitterBufferMinimumDelay: number | null = null
+        let jitterBufferEmittedCount: number | null = null
+        let totalDecodeTime: number | null = null
+        let totalAssemblyTime: number | null = null
+        let totalProcessingDelay: number | null = null
+        let framesDecoded: number | null = null
+        let framesAssembled: number | null = null
 
+        for (const [, value] of stats.entries()) {
             if ("decoderImplementation" in value && value.decoderImplementation != null) {
                 statsData.decoderImplementation = value.decoderImplementation
             }
@@ -403,42 +420,61 @@ export class WebRTCTransport implements Transport {
                 statsData.webrtcFps = value.framesPerSecond
             }
 
-            if ("jitterBufferDelay" in value && value.jitterBufferDelay != null) {
-                statsData.webrtcJitterBufferDelayMs = value.jitterBufferDelay
-            }
-            if ("jitterBufferTargetDelay" in value && value.jitterBufferTargetDelay != null) {
-                statsData.webrtcJitterBufferTargetDelayMs = value.jitterBufferTargetDelay
-            }
-            if ("jitterBufferMinimumDelay" in value && value.jitterBufferMinimumDelay != null) {
-                statsData.webrtcJitterBufferMinimumDelayMs = value.jitterBufferMinimumDelay
-            }
-            if ("jitter" in value && value.jitter != null) {
-                statsData.webrtcJitterMs = value.jitter
-            }
-            if ("totalDecodeTime" in value && value.totalDecodeTime != null) {
-                statsData.webrtcTotalDecodeTimeMs = value.totalDecodeTime
-            }
-            if ("totalAssemblyTime" in value && value.totalAssemblyTime != null) {
-                statsData.webrtcTotalAssemblyTimeMs = value.totalAssemblyTime
-            }
-            if ("totalProcessingDelay" in value && value.totalProcessingDelay != null) {
-                statsData.webrtcTotalProcessingDelayMs = value.totalProcessingDelay
-            }
-            if ("packetsReceived" in value && value.packetsReceived != null) {
-                statsData.webrtcPacketsReceived = value.packetsReceived
-            }
-            if ("packetsLost" in value && value.packetsLost != null) {
-                statsData.webrtcPacketsLost = value.packetsLost
-            }
-            if ("framesDropped" in value && value.framesDropped != null) {
-                statsData.webrtcFramesDropped = value.framesDropped
-            }
-            if ("keyFramesDecoded" in value && value.keyFramesDecoded != null) {
-                statsData.webrtcKeyFramesDecoded = value.keyFramesDecoded
-            }
-            if ("nackCount" in value && value.nackCount != null) {
-                statsData.webrtcNackCount = value.nackCount
-            }
+            if ("jitterBufferDelay" in value && value.jitterBufferDelay != null) jitterBufferDelay = value.jitterBufferDelay
+            if ("jitterBufferTargetDelay" in value && value.jitterBufferTargetDelay != null) jitterBufferTargetDelay = value.jitterBufferTargetDelay
+            if ("jitterBufferMinimumDelay" in value && value.jitterBufferMinimumDelay != null) jitterBufferMinimumDelay = value.jitterBufferMinimumDelay
+            if ("jitterBufferEmittedCount" in value && value.jitterBufferEmittedCount != null) jitterBufferEmittedCount = value.jitterBufferEmittedCount
+            if ("jitter" in value && value.jitter != null) statsData.webrtcJitterMs = value.jitter * 1000  // spec: seconds
+            if ("totalDecodeTime" in value && value.totalDecodeTime != null) totalDecodeTime = value.totalDecodeTime
+            if ("totalAssemblyTime" in value && value.totalAssemblyTime != null) totalAssemblyTime = value.totalAssemblyTime
+            if ("totalProcessingDelay" in value && value.totalProcessingDelay != null) totalProcessingDelay = value.totalProcessingDelay
+            if ("framesDecoded" in value && value.framesDecoded != null) { framesDecoded = value.framesDecoded; statsData.webrtcFramesDecoded = value.framesDecoded }
+            if ("framesAssembledFromMultiplePackets" in value && value.framesAssembledFromMultiplePackets != null) framesAssembled = value.framesAssembledFromMultiplePackets
+            if ("packetsReceived" in value && value.packetsReceived != null) statsData.webrtcPacketsReceived = value.packetsReceived
+            if ("packetsLost" in value && value.packetsLost != null) statsData.webrtcPacketsLost = value.packetsLost
+            if ("framesDropped" in value && value.framesDropped != null) statsData.webrtcFramesDropped = value.framesDropped
+            if ("keyFramesDecoded" in value && value.keyFramesDecoded != null) statsData.webrtcKeyFramesDecoded = value.keyFramesDecoded
+            if ("nackCount" in value && value.nackCount != null) statsData.webrtcNackCount = value.nackCount
+        }
+
+        // Turn cumulative seconds -> live per-frame ms using the delta since the previous sample.
+        const perFrame = (cur: number | null, prev: number, dCount: number): number | null =>
+            (cur == null || dCount <= 0) ? null : (cur - prev) / dCount * 1000
+        const prev = this.prevVideoStats
+        if (prev) {
+            const dEmit = (jitterBufferEmittedCount ?? 0) - prev.jitterBufferEmittedCount
+            const dDec = (framesDecoded ?? 0) - prev.framesDecoded
+            const dAsm = (framesAssembled ?? 0) - prev.framesAssembled
+            const set = (k: string, v: number | null) => { if (v != null && isFinite(v)) statsData[k] = v }
+            set("webrtcJitterBufferDelayMs", perFrame(jitterBufferDelay, prev.jitterBufferDelay, dEmit))
+            set("webrtcJitterBufferTargetDelayMs", perFrame(jitterBufferTargetDelay, prev.jitterBufferTargetDelay, dEmit))
+            set("webrtcJitterBufferMinimumDelayMs", perFrame(jitterBufferMinimumDelay, prev.jitterBufferMinimumDelay, dEmit))
+            set("webrtcTotalDecodeTimeMs", perFrame(totalDecodeTime, prev.totalDecodeTime, dDec))
+            set("webrtcTotalProcessingDelayMs", perFrame(totalProcessingDelay, prev.totalProcessingDelay, dDec))
+            set("webrtcTotalAssemblyTimeMs", perFrame(totalAssemblyTime, prev.totalAssemblyTime, dAsm))
+        }
+        this.prevVideoStats = {
+            jitterBufferDelay: jitterBufferDelay ?? 0, jitterBufferTargetDelay: jitterBufferTargetDelay ?? 0,
+            jitterBufferMinimumDelay: jitterBufferMinimumDelay ?? 0, jitterBufferEmittedCount: jitterBufferEmittedCount ?? 0,
+            totalDecodeTime: totalDecodeTime ?? 0, totalProcessingDelay: totalProcessingDelay ?? 0,
+            totalAssemblyTime: totalAssemblyTime ?? 0, framesDecoded: framesDecoded ?? 0, framesAssembled: framesAssembled ?? 0,
+        }
+
+        // REAL network round-trip time from the active ICE candidate pair (ms). streamerRttMs is
+        // streamer<->Sunshine on the SAME VM (~1ms); THIS is the browser<->VM network latency.
+        if (this.peer) {
+            try {
+                const pcStats = await this.peer.getStats()
+                let best: { rtt: number, nominated: boolean, bytes: number } | null = null
+                for (const [, v] of pcStats.entries()) {
+                    const cp = v as any
+                    if (cp.type === "candidate-pair" && cp.currentRoundTripTime != null) {
+                        const cand = { rtt: cp.currentRoundTripTime as number, nominated: !!cp.nominated, bytes: (cp.bytesReceived ?? 0) as number }
+                        if (best == null || (cand.nominated && !best.nominated) || (cand.nominated === best.nominated && cand.bytes > best.bytes)) best = cand
+                    }
+                }
+                if (best) statsData.webrtcRttMs = best.rtt * 1000
+            } catch { /* getStats can reject during teardown */ }
         }
 
         return statsData

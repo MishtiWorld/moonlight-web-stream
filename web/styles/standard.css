@@ -1233,19 +1233,40 @@ canvas.video-stream {
     object-fit: contain;
 }
 
+/* Hide the local browser cursor over the stream (toggled from the sidebar) so it doesn't
+   clash with the remote machine's own pointer. */
+html.hide-local-cursor .video-stream,
+html.hide-local-cursor #input {
+    cursor: none;
+}
+
 .audio-stream {
     display: none;
 }
 
+/* Full multi-line Stats overlay — a fixed, scrollable card in the bottom-left corner so it no
+   longer flows as raw yellow text over the controls. */
 .video-stats {
-    cursor: default;
     pointer-events: none;
+    position: fixed;
+    bottom: 14px;
+    left: 12px;
+    max-width: min(440px, 46vw);
+    max-height: 68vh;
+    overflow: auto;
+    z-index: 5;
 
-    color: #ffcc66;
-    text-shadow: 0 0 4px black, 2px 2px 4px black, -2px -2px 4px black, 2px -2px 4px black, -2px 2px 4px black;
-
-    position: relative;
-    z-index: 1;
+    white-space: pre-wrap;
+    font: 500 11.5px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color: #e8e8ea;
+    background: rgba(10, 10, 12, 0.72);
+    border: 1px solid rgba(255, 163, 0, 0.30);
+    border-radius: 10px;
+    padding: 12px 14px;
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
 }
 
 .local-touch-cursor {
@@ -1265,23 +1286,32 @@ canvas.video-stream {
     flex-direction: column;
 }
 
-/* Minimal top-left FPS/latency HUD (toggled by the FPS · ms button). */
+/* Minimal top-left FPS/latency HUD (toggled by the FPS · ms button; click it to switch between
+   the compact total and the network · processing · total breakdown). */
 .fps-hud {
     position: fixed;
     top: 10px;
     left: 12px;
     z-index: 6;
-    pointer-events: none;
+    pointer-events: auto;
+    cursor: pointer;
+    user-select: none;
     font: 600 13px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     color: #FFA300;
-    background: rgba(10, 10, 12, 0.62);
+    background: rgba(10, 10, 12, 0.66);
     border: 1px solid rgba(255, 163, 0, 0.35);
     border-radius: 8px;
-    padding: 6px 10px;
+    padding: 7px 11px;
     letter-spacing: 0.02em;
-    -webkit-backdrop-filter: blur(4px);
-    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
     text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+    transition: border-color .15s, background .15s;
+}
+.fps-hud:hover {
+    border-color: rgba(255, 163, 0, 0.7);
+    background: rgba(10, 10, 12, 0.82);
 }
 
 /* Modern, uniform in-stream control buttons. */
@@ -1314,6 +1344,28 @@ canvas.video-stream {
     background: rgba(255, 163, 0, 0.92);
     border-color: #FFA300;
     color: #171717;
+}
+/* An input source that has been switched OFF — clearly flagged in red so the user knows a
+   whole input class is currently blocked. */
+.sidebar-stream-buttons button.blocked {
+    background: rgba(229, 72, 72, 0.16);
+    border-color: rgba(229, 72, 72, 0.6);
+    color: #ff9b9b;
+    text-decoration: line-through;
+    text-decoration-thickness: 1px;
+}
+.sidebar-stream-buttons button.blocked:hover {
+    background: rgba(229, 72, 72, 0.26);
+    border-color: rgba(229, 72, 72, 0.85);
+}
+
+/* Small section heading inside the stream sidebar (e.g. "Inputs"). */
+.sidebar-stream-label {
+    margin: 12px 4px 2px;
+    font: 700 11px/1.2 -apple-system, "Segoe UI", Roboto, sans-serif;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.5);
 }
 
 .hiddeninput {

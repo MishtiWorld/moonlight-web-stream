@@ -132,6 +132,10 @@ class ViewerApp implements Component {
     // Minimal top-left FPS/latency HUD, toggled independently of the full Stats overlay.
     private fpsHud = document.createElement("div")
     private showFpsHud = localStorage.getItem("tb_fps_hud") === "1"
+    // false = compact (total only), true = breakdown (net · proc · total). Click the HUD to switch.
+    private fpsHudDetail = localStorage.getItem("tb_fps_detail") === "1"
+    // Hide the local browser cursor over the video (so it doesn't clash with the remote pointer).
+    private hideLocalCursor = localStorage.getItem("tb_hide_cursor") === "1"
     private showFullStats = false
     private localTouchCursorDiv = document.createElement("div")
     private stream: Stream
@@ -179,8 +183,14 @@ class ViewerApp implements Component {
         this.statsDiv.classList.add("video-stats")
         this.fpsHud.hidden = !this.showFpsHud
         this.fpsHud.classList.add("fps-hud")
+        this.fpsHud.title = "Click to toggle latency breakdown (network · processing · total)"
+        this.fpsHud.addEventListener("click", () => {
+            this.fpsHudDetail = !this.fpsHudDetail
+            localStorage.setItem("tb_fps_detail", this.fpsHudDetail ? "1" : "0")
+        })
         this.localTouchCursorDiv.hidden = true
         this.localTouchCursorDiv.classList.add("local-touch-cursor")
+        document.documentElement.classList.toggle("hide-local-cursor", this.hideLocalCursor)
 
         setInterval(() => {
             // Update the stats displays every 100ms. Full Stats overlay and the minimal
@@ -200,9 +210,19 @@ class ViewerApp implements Component {
             }
             if (this.showFpsHud) {
                 const c = stats.getCurrentStats()
+                const t = (c.transport ?? {}) as Record<string, number | string>
+                const n = (v: unknown): number | null => (typeof v === "number" && isFinite(v)) ? v : null
                 const fps = c.videoFps != null ? Math.round(c.videoFps) : "–"
-                const ms = c.streamerRttMs != null ? Math.round(c.streamerRttMs) : "–"
-                this.fpsHud.textContent = `${fps} FPS · ${ms} ms`
+                // net = real browser<->VM round-trip (ICE candidate pair), NOT streamerRttMs (that is
+                // streamer<->Sunshine on the same VM, ~1ms). proc = client receive pipeline (jitter
+                // buffer + decode). total = net + proc ≈ the interactive lag the user actually feels.
+                const net = n(t.webrtcRttMs)
+                const proc = n(t.webrtcTotalProcessingDelayMs)
+                const total = (net != null || proc != null) ? Math.round((net ?? 0) + (proc ?? 0)) : null
+                const r = (v: number | null) => v != null ? Math.round(v) : "–"
+                this.fpsHud.textContent = this.fpsHudDetail
+                    ? `${fps} FPS · net ${r(net)} · proc ${r(proc)} · ${total ?? "–"} ms`
+                    : `${fps} FPS · ${total ?? "–"} ms`
                 this.fpsHud.hidden = false
             } else {
                 this.fpsHud.hidden = true
@@ -880,6 +900,15 @@ class ViewerApp implements Component {
     isFpsHudOn(): boolean {
         return this.showFpsHud
     }
+    // Hide/show the local browser cursor over the stream (persisted).
+    toggleHideCursor() {
+        this.hideLocalCursor = !this.hideLocalCursor
+        localStorage.setItem("tb_hide_cursor", this.hideLocalCursor ? "1" : "0")
+        document.documentElement.classList.toggle("hide-local-cursor", this.hideLocalCursor)
+    }
+    isHideCursorOn(): boolean {
+        return this.hideLocalCursor
+    }
 }
 
 class ConnectionInfoModal implements Modal<void> {
@@ -1052,7 +1081,13 @@ class ViewerSidebar implements Component, Sidebar {
 
     private statsButton = document.createElement("button")
     private fpsButton = document.createElement("button")
+    private hideCursorButton = document.createElement("button")
     private exitStreamButton = document.createElement("button")
+
+    // Per-source input gates (enable/disable keyboard, mouse, gamepad independently).
+    private kbdInputButton = document.createElement("button")
+    private mouseInputButton = document.createElement("button")
+    private gamepadInputButton = document.createElement("button")
 
     private mouseMode: SelectComponent
     private touchMode: SelectComponent
@@ -1135,6 +1170,16 @@ class ViewerSidebar implements Component, Sidebar {
         })
         this.buttonDiv.appendChild(this.fpsButton)
 
+        // Hide local cursor (avoid the double-cursor with the remote pointer)
+        this.hideCursorButton.innerText = "Hide cursor"
+        this.hideCursorButton.title = "Hide the local mouse pointer over the stream"
+        this.hideCursorButton.classList.toggle("active", this.app.isHideCursorOn())
+        this.hideCursorButton.addEventListener("click", () => {
+            this.app.toggleHideCursor()
+            this.hideCursorButton.classList.toggle("active", this.app.isHideCursorOn())
+        })
+        this.buttonDiv.appendChild(this.hideCursorButton)
+
         // Stats (full overlay)
         this.statsButton.innerText = I.stream.stats
         this.statsButton.addEventListener("click", () => {
@@ -1187,6 +1232,47 @@ class ViewerSidebar implements Component, Sidebar {
         })
         this.touchMode.addChangeListener(this.onTouchModeChange.bind(this))
         this.touchMode.mount(this.div)
+
+        // Input source gates — enable/disable keyboard, mouse, gamepad independently. A button gets
+        // the `blocked` style while its input is cut off. Held keys/pads are flushed on disable so
+        // nothing stays stuck-pressed on the remote machine.
+        const toggleLabel = document.createElement("div")
+        toggleLabel.classList.add("sidebar-stream-label")
+        toggleLabel.innerText = "Inputs"
+        this.div.appendChild(toggleLabel)
+
+        const toggleDiv = document.createElement("div")
+        toggleDiv.classList.add("sidebar-stream-buttons")
+        const wireInputToggle = (
+            btn: HTMLButtonElement, label: string,
+            get: (c: StreamInputConfig) => boolean, set: (c: StreamInputConfig, v: boolean) => void,
+            onDisable?: () => void,
+        ) => {
+            const reflect = () => {
+                btn.innerText = label
+                btn.classList.toggle("blocked", !get(this.app.getInputConfig()))
+            }
+            btn.title = `Toggle ${label} input to the remote machine`
+            btn.addEventListener("click", () => {
+                const config = this.app.getInputConfig()
+                const enabling = !get(config)
+                if (!enabling && onDisable) onDisable() // flush held state BEFORE cutting the gate
+                set(config, enabling)
+                this.app.setInputConfig(config)
+                reflect()
+            })
+            reflect()
+            toggleDiv.appendChild(btn)
+        }
+        wireInputToggle(this.kbdInputButton, "⌨ Keyboard",
+            c => c.keyboardEnabled, (c, v) => { c.keyboardEnabled = v },
+            () => this.app.getStream()?.getInput().raiseAllKeys())
+        wireInputToggle(this.mouseInputButton, "🖱 Mouse",
+            c => c.mouseEnabled, (c, v) => { c.mouseEnabled = v })
+        wireInputToggle(this.gamepadInputButton, "🎮 Gamepad",
+            c => c.gamepadEnabled, (c, v) => { c.gamepadEnabled = v },
+            () => this.app.getStream()?.getInput().releaseAllGamepads())
+        this.div.appendChild(toggleDiv)
     }
 
     onCapabilitiesChange(capabilities: StreamCapabilities) {
